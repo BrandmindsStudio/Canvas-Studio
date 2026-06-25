@@ -64,31 +64,64 @@
           <button class="tool-button" type="button" data-tool="picker" title="Color picker" aria-label="Color picker">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 5l5 5"/><path d="M12 7l5 5-8.5 8.5H4v-4.5z"/><path d="M17 3l4 4-2 2-4-4z"/></svg>
           </button>
+          <button class="tool-button" type="button" data-tool="ai3d" title="AI 3D" aria-label="AI 3D">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5"/><path d="M12 12v9"/><path d="M12 12L4 7.5"/><path d="M17.5 2.5l.8 1.9 1.9.8-1.9.8-.8 1.9-.8-1.9-1.9-.8 1.9-.8z"/></svg>
+          </button>
         </aside>
 
         <section class="panel controls-panel" aria-label="Paint controls">
-          <div class="control-block">
-            <span class="control-title">Color</span>
-            <label class="color-picker-shell" title="Primary color">
-              <input id="colorPicker" type="color" value="#1f7ae0" aria-label="Primary color">
-            </label>
-            <div class="swatches" id="swatches" aria-label="Color swatches"></div>
+          <div class="paint-controls" id="paintControls">
+            <div class="control-block">
+              <span class="control-title">Color</span>
+              <label class="color-picker-shell" title="Primary color">
+                <input id="colorPicker" type="color" value="#1f7ae0" aria-label="Primary color">
+              </label>
+              <div class="swatches" id="swatches" aria-label="Color swatches"></div>
+            </div>
+
+            <div class="control-block">
+              <label class="control-title" for="brushSize">Size <span id="brushSizeValue">8</span></label>
+              <input id="brushSize" type="range" min="1" max="64" value="8" aria-label="Brush size">
+            </div>
+
+            <div class="control-block two-columns">
+              <label class="toggle-row" title="Fill shape">
+                <input id="shapeFill" type="checkbox">
+                <span>Fill</span>
+              </label>
+              <label class="toggle-row" title="Snap line angle">
+                <input id="snapAngle" type="checkbox">
+                <span>Snap</span>
+              </label>
+            </div>
           </div>
 
-          <div class="control-block">
-            <label class="control-title" for="brushSize">Size <span id="brushSizeValue">8</span></label>
-            <input id="brushSize" type="range" min="1" max="64" value="8" aria-label="Brush size">
-          </div>
+          <div class="ai-controls hidden" id="aiControls">
+            <div class="control-block">
+              <label class="control-title" for="aiPrompt">Prompt</label>
+              <textarea id="aiPrompt" rows="5" maxlength="280" placeholder="sleek product mockup, soft plastic, rounded bevels"></textarea>
+            </div>
 
-          <div class="control-block two-columns">
-            <label class="toggle-row" title="Fill shape">
-              <input id="shapeFill" type="checkbox">
-              <span>Fill</span>
-            </label>
-            <label class="toggle-row" title="Snap line angle">
-              <input id="snapAngle" type="checkbox">
-              <span>Snap</span>
-            </label>
+            <div class="control-block">
+              <label class="control-title" for="aiDepth">Depth <span id="aiDepthValue">55</span></label>
+              <input id="aiDepth" type="range" min="12" max="100" value="55" aria-label="3D depth">
+            </div>
+
+            <div class="control-block">
+              <label class="control-title" for="aiSmooth">Smooth <span id="aiSmoothValue">2</span></label>
+              <input id="aiSmooth" type="range" min="0" max="5" value="2" aria-label="3D smoothing">
+            </div>
+
+            <div class="control-block">
+              <button class="primary-action" id="generate3dBtn" type="button">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5"/><path d="M12 12v9"/><path d="M12 12L4 7.5"/></svg>
+                <span>Generate</span>
+              </button>
+              <button class="secondary-action" id="exportCanvas3dBtn" type="button">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+                <span>Canvas PNG</span>
+              </button>
+            </div>
           </div>
         </section>
 
@@ -97,6 +130,26 @@
             <canvas id="paintCanvas" width="1200" height="760"></canvas>
             <div class="cursor-preview" id="cursorPreview" aria-hidden="true"></div>
           </div>
+
+          <section class="ai3d-dock hidden" id="ai3dDock" aria-label="AI 3D result">
+            <div class="ai3d-preview-shell">
+              <canvas id="ai3dPreview" width="480" height="360"></canvas>
+            </div>
+            <div class="ai3d-meta">
+              <span class="status-pill" id="ai3dStatus">Ready</span>
+              <span id="ai3dStats">0 vertices</span>
+            </div>
+            <div class="ai3d-actions">
+              <a class="secondary-action disabled" id="downloadObjLink" href="#" download="canvas-studio.obj" aria-disabled="true">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+                <span>OBJ</span>
+              </a>
+              <button class="secondary-action" id="reset3dViewBtn" type="button">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v6h6"/></svg>
+                <span>Reset</span>
+              </button>
+            </div>
+          </section>
         </section>
       </section>
 

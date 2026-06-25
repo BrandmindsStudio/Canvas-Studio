@@ -15,6 +15,22 @@ const statusTool = document.querySelector("#statusTool");
 const statusPosition = document.querySelector("#statusPosition");
 const historyStatus = document.querySelector("#historyStatus");
 const cursorPreview = document.querySelector("#cursorPreview");
+const paintControls = document.querySelector("#paintControls");
+const aiControls = document.querySelector("#aiControls");
+const canvasArea = document.querySelector(".canvas-area");
+const ai3dDock = document.querySelector("#ai3dDock");
+const aiPrompt = document.querySelector("#aiPrompt");
+const aiDepth = document.querySelector("#aiDepth");
+const aiDepthValue = document.querySelector("#aiDepthValue");
+const aiSmooth = document.querySelector("#aiSmooth");
+const aiSmoothValue = document.querySelector("#aiSmoothValue");
+const generate3dBtn = document.querySelector("#generate3dBtn");
+const exportCanvas3dBtn = document.querySelector("#exportCanvas3dBtn");
+const ai3dPreview = document.querySelector("#ai3dPreview");
+const ai3dStatus = document.querySelector("#ai3dStatus");
+const ai3dStats = document.querySelector("#ai3dStats");
+const downloadObjLink = document.querySelector("#downloadObjLink");
+const reset3dViewBtn = document.querySelector("#reset3dViewBtn");
 
 const palette = [
   "#000000", "#ffffff", "#ef4444", "#f59e0b", "#facc15", "#22c55e",
@@ -30,7 +46,8 @@ const toolLabels = {
   ellipse: "Ellipse",
   text: "Text",
   fill: "Fill",
-  picker: "Picker"
+  picker: "Picker",
+  ai3d: "AI 3D"
 };
 
 let activeTool = "brush";
@@ -41,6 +58,7 @@ let lastPointerEvent = null;
 let previewImage = null;
 let undoStack = [];
 let redoStack = [];
+let ai3dJobTimer = null;
 
 function initCanvas() {
   ctx.fillStyle = "#ffffff";
@@ -61,6 +79,18 @@ function setTool(tool) {
   activeTool = tool;
   toolButtons.forEach((button) => button.classList.toggle("active", button.dataset.tool === tool));
   statusTool.textContent = toolLabels[tool];
+  const isAi3d = tool === "ai3d";
+
+  paintControls.classList.toggle("hidden", isAi3d);
+  aiControls.classList.toggle("hidden", !isAi3d);
+  ai3dDock.classList.toggle("hidden", !isAi3d);
+  canvasArea.classList.toggle("ai-mode", isAi3d);
+
+  if (isAi3d) {
+    cursorPreview.classList.remove("visible");
+    resize3dPreview();
+  }
+
   updateCursorPreview(lastPointerEvent);
 }
 
@@ -273,6 +303,8 @@ function beginDrawing(event) {
   const point = getPoint(event);
   updateCursorPreview(event);
 
+  if (activeTool === "ai3d") return;
+
   if (activeTool === "picker") {
     pickColor(point);
     return;
@@ -340,6 +372,11 @@ function rgbaFromHex(hex, alpha) {
 function updateCursorPreview(event) {
   if (!event || !cursorPreview) return;
 
+  if (activeTool === "ai3d") {
+    cursorPreview.classList.remove("visible");
+    return;
+  }
+
   const canvasRect = canvas.getBoundingClientRect();
   const withinCanvas =
     event.clientX >= canvasRect.left &&
@@ -371,6 +408,336 @@ function updateCursorPreview(event) {
   cursorPreview.classList.add("visible");
 }
 
+function setAi3dStatus(text, busy = false) {
+  ai3dStatus.textContent = text;
+  generate3dBtn.disabled = busy;
+}
+
+function setDownloadLink(url) {
+  if (!url) {
+    downloadObjLink.href = "#";
+    downloadObjLink.classList.add("disabled");
+    downloadObjLink.setAttribute("aria-disabled", "true");
+    return;
+  }
+
+  downloadObjLink.href = url;
+  downloadObjLink.classList.remove("disabled");
+  downloadObjLink.setAttribute("aria-disabled", "false");
+}
+
+function sampleCanvasFor3d() {
+  const sampleWidth = 72;
+  const sampleHeight = Math.round(sampleWidth * (canvas.height / canvas.width));
+  const sampleCanvas = document.createElement("canvas");
+  const sampleCtx = sampleCanvas.getContext("2d", { willReadFrequently: true });
+
+  sampleCanvas.width = sampleWidth;
+  sampleCanvas.height = sampleHeight;
+  sampleCtx.fillStyle = "#ffffff";
+  sampleCtx.fillRect(0, 0, sampleWidth, sampleHeight);
+  sampleCtx.drawImage(canvas, 0, 0, sampleWidth, sampleHeight);
+
+  const pixels = sampleCtx.getImageData(0, 0, sampleWidth, sampleHeight).data;
+  const samples = [];
+  let maxInk = 0;
+
+  for (let index = 0; index < pixels.length; index += 4) {
+    const r = pixels[index];
+    const g = pixels[index + 1];
+    const b = pixels[index + 2];
+    const distanceFromWhite = Math.hypot(255 - r, 255 - g, 255 - b) / 441.7;
+    const ink = Math.min(1, Math.max(0, distanceFromWhite));
+    maxInk = Math.max(maxInk, ink);
+    samples.push({
+      i: Number(ink.toFixed(4)),
+      r,
+      g,
+      b
+    });
+  }
+
+  return {
+    width: sampleWidth,
+    height: sampleHeight,
+    maxInk: Number(maxInk.toFixed(4)),
+    samples
+  };
+}
+
+async function createAi3dJob() {
+  setAi3dStatus("Queued", true);
+  setDownloadLink(null);
+  ai3dStats.textContent = "Preparing mesh";
+
+  const payload = {
+    prompt: aiPrompt.value.trim(),
+    depth: Number(aiDepth.value),
+    smooth: Number(aiSmooth.value),
+    source: sampleCanvasFor3d()
+  };
+
+  try {
+    const response = await fetch("/api/ai3d/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    const job = await response.json();
+    pollAi3dJob(job.id);
+  } catch (error) {
+    setAi3dStatus("Server offline");
+    ai3dStats.textContent = "Start the local AI server";
+    generate3dBtn.disabled = false;
+  }
+}
+
+async function pollAi3dJob(jobId) {
+  window.clearTimeout(ai3dJobTimer);
+
+  try {
+    const response = await fetch(`/api/ai3d/jobs/${jobId}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    const job = await response.json();
+    setAi3dStatus(job.status === "done" ? "Done" : "Generating", job.status !== "done" && job.status !== "failed");
+
+    if (job.status === "done") {
+      applyAi3dJob(job);
+      return;
+    }
+
+    if (job.status === "failed") {
+      ai3dStats.textContent = job.error || "Generation failed";
+      generate3dBtn.disabled = false;
+      return;
+    }
+
+    ai3dStats.textContent = `${job.progress || 0}%`;
+    ai3dJobTimer = window.setTimeout(() => pollAi3dJob(jobId), 650);
+  } catch (error) {
+    setAi3dStatus("Server offline");
+    ai3dStats.textContent = "Connection lost";
+    generate3dBtn.disabled = false;
+  }
+}
+
+function applyAi3dJob(job) {
+  generate3dBtn.disabled = false;
+  ai3dStats.textContent = `${job.preview.vertexCount} vertices`;
+  setDownloadLink(job.output.objUrl);
+  set3dModel(job.preview);
+}
+
+const viewer3d = {
+  gl: null,
+  program: null,
+  positionBuffer: null,
+  colorBuffer: null,
+  indexBuffer: null,
+  indexCount: 0,
+  vertexCount: 0,
+  yaw: -0.55,
+  pitch: -0.72,
+  zoom: 4.9,
+  dragging: false,
+  lastX: 0,
+  lastY: 0,
+  animationFrame: null
+};
+
+function createShader(gl, type, source) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    throw new Error(gl.getShaderInfoLog(shader));
+  }
+
+  return shader;
+}
+
+function init3dViewer() {
+  if (viewer3d.gl || !ai3dPreview) return;
+
+  const gl = ai3dPreview.getContext("webgl", { antialias: true });
+  if (!gl) {
+    ai3dStats.textContent = "WebGL unavailable";
+    return;
+  }
+
+  const vertexShader = createShader(gl, gl.VERTEX_SHADER, `
+    attribute vec3 aPosition;
+    attribute vec3 aColor;
+    uniform float uYaw;
+    uniform float uPitch;
+    uniform float uZoom;
+    uniform float uAspect;
+    varying vec3 vColor;
+
+    vec3 rotateY(vec3 p, float a) {
+      float c = cos(a);
+      float s = sin(a);
+      return vec3(c * p.x + s * p.z, p.y, -s * p.x + c * p.z);
+    }
+
+    vec3 rotateX(vec3 p, float a) {
+      float c = cos(a);
+      float s = sin(a);
+      return vec3(p.x, c * p.y - s * p.z, s * p.y + c * p.z);
+    }
+
+    void main() {
+      vec3 p = rotateX(rotateY(aPosition, uYaw), uPitch);
+      float z = p.z + uZoom;
+      float scale = 1.85 / max(z, 0.2);
+      gl_Position = vec4(p.x * scale / uAspect, (p.y - 0.16) * scale, (z - 1.0) / 8.0, 1.0);
+      vColor = aColor * (0.72 + clamp(p.y, 0.0, 1.0) * 0.55);
+    }
+  `);
+
+  const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, `
+    precision mediump float;
+    varying vec3 vColor;
+
+    void main() {
+      gl_FragColor = vec4(vColor, 1.0);
+    }
+  `);
+
+  const program = gl.createProgram();
+  gl.attachShader(program, vertexShader);
+  gl.attachShader(program, fragmentShader);
+  gl.linkProgram(program);
+
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    throw new Error(gl.getProgramInfoLog(program));
+  }
+
+  viewer3d.gl = gl;
+  viewer3d.program = program;
+  viewer3d.positionBuffer = gl.createBuffer();
+  viewer3d.colorBuffer = gl.createBuffer();
+  viewer3d.indexBuffer = gl.createBuffer();
+
+  ai3dPreview.addEventListener("pointerdown", (event) => {
+    viewer3d.dragging = true;
+    viewer3d.lastX = event.clientX;
+    viewer3d.lastY = event.clientY;
+    ai3dPreview.setPointerCapture(event.pointerId);
+  });
+
+  ai3dPreview.addEventListener("pointermove", (event) => {
+    if (!viewer3d.dragging) return;
+    const dx = event.clientX - viewer3d.lastX;
+    const dy = event.clientY - viewer3d.lastY;
+    viewer3d.yaw += dx * 0.01;
+    viewer3d.pitch = Math.max(-1.35, Math.min(-0.18, viewer3d.pitch + dy * 0.01));
+    viewer3d.lastX = event.clientX;
+    viewer3d.lastY = event.clientY;
+  });
+
+  ai3dPreview.addEventListener("pointerup", () => {
+    viewer3d.dragging = false;
+  });
+
+  ai3dPreview.addEventListener("pointercancel", () => {
+    viewer3d.dragging = false;
+  });
+
+  ai3dPreview.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    viewer3d.zoom = Math.max(3.2, Math.min(7.2, viewer3d.zoom + event.deltaY * 0.004));
+  }, { passive: false });
+
+  render3dPreview();
+}
+
+function resize3dPreview() {
+  if (!ai3dPreview) return;
+
+  const rect = ai3dPreview.getBoundingClientRect();
+  const scale = window.devicePixelRatio || 1;
+  const width = Math.max(240, Math.round(rect.width * scale));
+  const height = Math.max(180, Math.round(rect.height * scale));
+
+  if (ai3dPreview.width !== width || ai3dPreview.height !== height) {
+    ai3dPreview.width = width;
+    ai3dPreview.height = height;
+  }
+}
+
+function set3dModel(preview) {
+  init3dViewer();
+  resize3dPreview();
+
+  const gl = viewer3d.gl;
+  if (!gl) return;
+
+  const vertices = new Float32Array(preview.vertices);
+  const colors = new Float32Array(preview.colors);
+  const indices = new Uint16Array(preview.indices);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, viewer3d.positionBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, viewer3d.colorBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, colors, gl.STATIC_DRAW);
+
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, viewer3d.indexBuffer);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+
+  viewer3d.indexCount = indices.length;
+  viewer3d.vertexCount = preview.vertexCount;
+}
+
+function reset3dView() {
+  viewer3d.yaw = -0.55;
+  viewer3d.pitch = -0.72;
+  viewer3d.zoom = 4.9;
+}
+
+function render3dPreview() {
+  const gl = viewer3d.gl;
+
+  if (gl) {
+    resize3dPreview();
+    gl.viewport(0, 0, ai3dPreview.width, ai3dPreview.height);
+    gl.clearColor(0.965, 0.975, 0.99, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.enable(gl.DEPTH_TEST);
+    gl.useProgram(viewer3d.program);
+
+    if (viewer3d.indexCount > 0) {
+      if (!viewer3d.dragging) viewer3d.yaw += 0.003;
+
+      const positionLocation = gl.getAttribLocation(viewer3d.program, "aPosition");
+      const colorLocation = gl.getAttribLocation(viewer3d.program, "aColor");
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, viewer3d.positionBuffer);
+      gl.enableVertexAttribArray(positionLocation);
+      gl.vertexAttribPointer(positionLocation, 3, gl.FLOAT, false, 0, 0);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, viewer3d.colorBuffer);
+      gl.enableVertexAttribArray(colorLocation);
+      gl.vertexAttribPointer(colorLocation, 3, gl.FLOAT, false, 0, 0);
+
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, viewer3d.indexBuffer);
+      gl.uniform1f(gl.getUniformLocation(viewer3d.program, "uYaw"), viewer3d.yaw);
+      gl.uniform1f(gl.getUniformLocation(viewer3d.program, "uPitch"), viewer3d.pitch);
+      gl.uniform1f(gl.getUniformLocation(viewer3d.program, "uZoom"), viewer3d.zoom);
+      gl.uniform1f(gl.getUniformLocation(viewer3d.program, "uAspect"), ai3dPreview.width / ai3dPreview.height);
+      gl.drawElements(gl.TRIANGLES, viewer3d.indexCount, gl.UNSIGNED_SHORT, 0);
+    }
+  }
+
+  viewer3d.animationFrame = window.requestAnimationFrame(render3dPreview);
+}
+
 palette.forEach((color) => {
   const button = document.createElement("button");
   button.type = "button";
@@ -393,6 +760,14 @@ toolButtons.forEach((button) => {
 brushSize.addEventListener("input", () => {
   brushSizeValue.textContent = brushSize.value;
   updateCursorPreview(lastPointerEvent);
+});
+
+aiDepth.addEventListener("input", () => {
+  aiDepthValue.textContent = aiDepth.value;
+});
+
+aiSmooth.addEventListener("input", () => {
+  aiSmoothValue.textContent = aiSmooth.value;
 });
 
 colorPicker.addEventListener("input", () => {
@@ -426,6 +801,17 @@ downloadBtn.addEventListener("click", () => {
   link.click();
 });
 
+exportCanvas3dBtn.addEventListener("click", () => {
+  const link = document.createElement("a");
+  link.download = "canvas-studio-source.png";
+  link.href = canvas.toDataURL("image/png");
+  link.click();
+});
+
+generate3dBtn.addEventListener("click", createAi3dJob);
+reset3dViewBtn.addEventListener("click", reset3dView);
+window.addEventListener("resize", resize3dPreview);
+
 canvas.addEventListener("pointerdown", beginDrawing);
 canvas.addEventListener("pointermove", continueDrawing);
 canvas.addEventListener("pointerup", endDrawing);
@@ -458,3 +844,4 @@ window.addEventListener("keydown", (event) => {
 
 initCanvas();
 updateSwatches();
+init3dViewer();
