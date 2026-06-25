@@ -20,6 +20,8 @@ const aiControls = document.querySelector("#aiControls");
 const canvasArea = document.querySelector(".canvas-area");
 const ai3dDock = document.querySelector("#ai3dDock");
 const aiPrompt = document.querySelector("#aiPrompt");
+const aiRunner = document.querySelector("#aiRunner");
+const aiRunnerNote = document.querySelector("#aiRunnerNote");
 const aiDepth = document.querySelector("#aiDepth");
 const aiDepthValue = document.querySelector("#aiDepthValue");
 const aiSmooth = document.querySelector("#aiSmooth");
@@ -30,6 +32,7 @@ const ai3dPreview = document.querySelector("#ai3dPreview");
 const ai3dStatus = document.querySelector("#ai3dStatus");
 const ai3dStats = document.querySelector("#ai3dStats");
 const downloadObjLink = document.querySelector("#downloadObjLink");
+const download3dFormat = document.querySelector("#download3dFormat");
 const reset3dViewBtn = document.querySelector("#reset3dViewBtn");
 
 const palette = [
@@ -59,6 +62,7 @@ let previewImage = null;
 let undoStack = [];
 let redoStack = [];
 let ai3dJobTimer = null;
+let ai3dCapabilities = null;
 
 function initCanvas() {
   ctx.fillStyle = "#ffffff";
@@ -89,6 +93,7 @@ function setTool(tool) {
   if (isAi3d) {
     cursorPreview.classList.remove("visible");
     resize3dPreview();
+    refreshAi3dCapabilities();
   }
 
   updateCursorPreview(lastPointerEvent);
@@ -413,17 +418,46 @@ function setAi3dStatus(text, busy = false) {
   generate3dBtn.disabled = busy;
 }
 
-function setDownloadLink(url) {
+function setDownloadLink(url, format = "OBJ") {
   if (!url) {
     downloadObjLink.href = "#";
     downloadObjLink.classList.add("disabled");
     downloadObjLink.setAttribute("aria-disabled", "true");
+    download3dFormat.textContent = format;
     return;
   }
 
   downloadObjLink.href = url;
+  downloadObjLink.download = `canvas-studio.${format.toLowerCase()}`;
+  download3dFormat.textContent = format;
   downloadObjLink.classList.remove("disabled");
   downloadObjLink.setAttribute("aria-disabled", "false");
+}
+
+async function refreshAi3dCapabilities() {
+  try {
+    const response = await fetch("/api/ai3d/status");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    ai3dCapabilities = await response.json();
+    updateRunnerNote();
+  } catch (error) {
+    aiRunnerNote.textContent = "Local AI server is not reachable.";
+  }
+}
+
+function updateRunnerNote() {
+  if (!ai3dCapabilities) return;
+
+  if (aiRunner.value === "relief") {
+    aiRunnerNote.textContent = "Fast local preview only. Not Meshy-quality.";
+    generate3dBtn.disabled = false;
+    return;
+  }
+
+  const sf3d = ai3dCapabilities.runners?.sf3d;
+
+  aiRunnerNote.textContent = sf3d?.message || "Stable Fast 3D is not installed yet.";
+  generate3dBtn.disabled = !sf3d?.available;
 }
 
 function sampleCanvasFor3d() {
@@ -466,14 +500,28 @@ function sampleCanvasFor3d() {
 }
 
 async function createAi3dJob() {
+  if (!ai3dCapabilities) await refreshAi3dCapabilities();
+
+  const selectedRunner = aiRunner.value;
+  const sf3d = ai3dCapabilities?.runners?.sf3d;
+
+  if (selectedRunner === "sf3d" && !sf3d?.available) {
+    setAi3dStatus(sf3d?.authReady ? "Install needed" : "Needs access");
+    ai3dStats.textContent = sf3d?.message || "Stable Fast 3D is not ready";
+    updateRunnerNote();
+    return;
+  }
+
   setAi3dStatus("Queued", true);
   setDownloadLink(null);
   ai3dStats.textContent = "Preparing mesh";
 
   const payload = {
     prompt: aiPrompt.value.trim(),
+    runner: selectedRunner,
     depth: Number(aiDepth.value),
     smooth: Number(aiSmooth.value),
+    canvasPng: canvas.toDataURL("image/png"),
     source: sampleCanvasFor3d()
   };
 
@@ -527,9 +575,17 @@ async function pollAi3dJob(jobId) {
 
 function applyAi3dJob(job) {
   generate3dBtn.disabled = false;
-  ai3dStats.textContent = `${job.preview.vertexCount} vertices`;
-  setDownloadLink(job.output.objUrl);
-  set3dModel(job.preview);
+  const output = job.output || {};
+
+  if (output.glbUrl) {
+    ai3dStats.textContent = job.preview?.vertexCount ? `${job.preview.vertexCount} vertices` : "Professional GLB ready";
+    setDownloadLink(output.glbUrl, "GLB");
+  } else {
+    ai3dStats.textContent = `${job.preview.vertexCount} vertices`;
+    setDownloadLink(output.objUrl, "OBJ");
+  }
+
+  if (job.preview) set3dModel(job.preview);
 }
 
 const viewer3d = {
@@ -769,6 +825,8 @@ aiDepth.addEventListener("input", () => {
 aiSmooth.addEventListener("input", () => {
   aiSmoothValue.textContent = aiSmooth.value;
 });
+
+aiRunner.addEventListener("change", updateRunnerNote);
 
 colorPicker.addEventListener("input", () => {
   updateSwatches();

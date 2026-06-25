@@ -42,6 +42,10 @@ textarea {
   font: inherit;
 }
 
+select {
+  font: inherit;
+}
+
 button {
   -webkit-tap-highlight-color: transparent;
 }
@@ -361,8 +365,27 @@ svg {
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.75) inset;
 }
 
+#aiRunner {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 10px;
+  background: rgba(255, 255, 255, 0.74);
+  color: var(--text);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.75) inset;
+}
+
 #aiPrompt::placeholder {
   color: rgba(60, 60, 67, 0.45);
+}
+
+.control-note {
+  margin: -2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 560;
+  line-height: 1.35;
 }
 
 .primary-action,

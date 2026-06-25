@@ -103,6 +103,15 @@
             </div>
 
             <div class="control-block">
+              <label class="control-title" for="aiRunner">Runner</label>
+              <select id="aiRunner" aria-label="AI 3D runner">
+                <option value="sf3d">Professional SF3D</option>
+                <option value="relief">Fast preview relief</option>
+              </select>
+              <p class="control-note" id="aiRunnerNote">Checking local model runner...</p>
+            </div>
+
+            <div class="control-block">
               <label class="control-title" for="aiDepth">Depth <span id="aiDepthValue">55</span></label>
               <input id="aiDepth" type="range" min="12" max="100" value="55" aria-label="3D depth">
             </div>
@@ -142,7 +151,7 @@
             <div class="ai3d-actions">
               <a class="secondary-action disabled" id="downloadObjLink" href="#" download="canvas-studio.obj" aria-disabled="true">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
-                <span>OBJ</span>
+                <span id="download3dFormat">OBJ</span>
               </a>
               <button class="secondary-action" id="reset3dViewBtn" type="button">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v6h6"/></svg>

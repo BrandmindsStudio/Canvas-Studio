@@ -1,13 +1,17 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const http = require("http");
+const os = require("os");
 const path = require("path");
+const { spawn } = require("child_process");
 const { URL } = require("url");
 
 const PORT = Number(process.env.PORT || 5174);
 const HOST = process.env.HOST || "127.0.0.1";
 const ROOT = __dirname;
 const GENERATED_DIR = path.join(ROOT, "generated");
+const MODELS_DIR = path.join(ROOT, "models");
+const DEFAULT_SF3D_DIR = path.join(MODELS_DIR, "stable-fast-3d");
 const jobs = new Map();
 
 fs.mkdirSync(GENERATED_DIR, { recursive: true });
@@ -18,6 +22,8 @@ const mimeTypes = {
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".obj": "text/plain; charset=utf-8",
+  ".glb": "model/gltf-binary",
+  ".gltf": "model/gltf+json",
   ".png": "image/png",
   ".svg": "image/svg+xml"
 };
@@ -50,6 +56,98 @@ function readRequestBody(request) {
     request.on("end", () => resolve(body));
     request.on("error", reject);
   });
+}
+
+function fileExists(filePath) {
+  try {
+    fs.accessSync(filePath, fs.constants.F_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getHfAccessState() {
+  const homeDir = os.homedir();
+  const hfHome = process.env.HF_HOME || path.join(homeDir, ".cache", "huggingface");
+  const tokenFiles = [
+    path.join(hfHome, "token"),
+    path.join(homeDir, ".huggingface", "token")
+  ];
+  const cachedWeights = path.join(hfHome, "hub", "models--stabilityai--stable-fast-3d");
+
+  if (process.env.HF_TOKEN || process.env.HUGGING_FACE_HUB_TOKEN) {
+    return { ready: true, source: "environment token" };
+  }
+
+  if (tokenFiles.some(fileExists)) {
+    return { ready: true, source: "Hugging Face login" };
+  }
+
+  if (fileExists(cachedWeights)) {
+    return { ready: true, source: "cached model weights" };
+  }
+
+  return { ready: false, source: null };
+}
+
+function getSf3dConfig() {
+  const sf3dDir = process.env.SF3D_DIR || DEFAULT_SF3D_DIR;
+  const venvPython = path.join(sf3dDir, ".venv", "bin", "python");
+  const python = process.env.SF3D_PYTHON || (fileExists(venvPython) ? venvPython : "python3");
+  const runPy = path.join(sf3dDir, "run.py");
+  const missing = [];
+  const hfAccess = getHfAccessState();
+
+  if (!fileExists(sf3dDir)) missing.push(`missing repo at ${path.relative(ROOT, sf3dDir)}`);
+  if (!fileExists(runPy)) missing.push("missing run.py");
+  if (!fileExists(venvPython) && !process.env.SF3D_PYTHON) missing.push("missing .venv Python");
+
+  const installed = missing.length === 0;
+  const available = installed && hfAccess.ready;
+  const message = (() => {
+    if (!installed) {
+      return `Stable Fast 3D is not ready: ${missing.join(", ")}. Run scripts/setup-sf3d.sh after Hugging Face access is approved.`;
+    }
+
+    if (!hfAccess.ready) {
+      return "Stable Fast 3D is installed, but gated model access is missing. Add HF_TOKEN or run huggingface-cli login, then restart npm start.";
+    }
+
+    return `Stable Fast 3D runner is ready via ${hfAccess.source}. This will generate a real GLB.`;
+  })();
+
+  return {
+    available,
+    installed,
+    authReady: hfAccess.ready,
+    dir: sf3dDir,
+    python,
+    runPy,
+    missing,
+    message
+  };
+}
+
+function getCapabilities() {
+  const sf3d = getSf3dConfig();
+
+  return {
+    ok: true,
+    runners: {
+      sf3d: {
+        available: sf3d.available,
+        installed: sf3d.installed,
+        authReady: sf3d.authReady,
+        message: sf3d.message,
+        dir: path.relative(ROOT, sf3d.dir) || "."
+      },
+      relief: {
+        available: true,
+        message: "Fast local preview mesh. Not professional model generation."
+      }
+    }
+  };
 }
 
 function clamp(value, min, max) {
@@ -124,6 +222,99 @@ function smoothHeights(heights, width, height, iterations) {
   }
 
   return current;
+}
+
+function writeDataUrlToFile(dataUrl, filePath) {
+  const match = String(dataUrl || "").match(/^data:image\/png;base64,(.+)$/);
+  if (!match) throw new Error("Missing canvas PNG input");
+  fs.writeFileSync(filePath, Buffer.from(match[1], "base64"));
+}
+
+function findGeneratedModel(jobDir) {
+  const entries = fs.readdirSync(jobDir, { recursive: true });
+  const files = entries
+    .map((entry) => path.join(jobDir, entry))
+    .filter((entryPath) => fs.statSync(entryPath).isFile());
+
+  return files.find((filePath) => filePath.endsWith(".glb"))
+    || files.find((filePath) => filePath.endsWith(".obj"))
+    || null;
+}
+
+function runCommand(command, args, options, onProgress) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, options);
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+      onProgress?.(stdout, stderr);
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+      onProgress?.(stdout, stderr);
+    });
+
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+
+      const detail = (stderr || stdout || "").split("\n").slice(-12).join("\n").trim();
+      reject(new Error(`SF3D exited with code ${code}${detail ? `: ${detail}` : ""}`));
+    });
+  });
+}
+
+async function runSf3d(payload, jobId, job) {
+  const config = getSf3dConfig();
+  if (!config.available) throw new Error(config.message);
+
+  const jobDir = path.join(GENERATED_DIR, jobId);
+  fs.mkdirSync(jobDir, { recursive: true });
+
+  const inputPath = path.join(jobDir, "input.png");
+  writeDataUrlToFile(payload.canvasPng, inputPath);
+
+  job.progress = 8;
+  job.message = "Saved canvas input";
+
+  const args = [
+    config.runPy,
+    inputPath,
+    "--output-dir",
+    jobDir,
+    "--texture-resolution",
+    String(process.env.SF3D_TEXTURE_RESOLUTION || 1024),
+    "--remesh_option",
+    process.env.SF3D_REMESH_OPTION || "triangle"
+  ];
+
+  await runCommand(config.python, args, {
+    cwd: config.dir,
+    env: {
+      ...process.env,
+      PYTORCH_ENABLE_MPS_FALLBACK: "1"
+    }
+  }, () => {
+    job.progress = Math.max(job.progress, 45);
+    job.message = "Running Stable Fast 3D";
+  });
+
+  const modelPath = findGeneratedModel(jobDir);
+  if (!modelPath) throw new Error("SF3D finished but no GLB/OBJ was found in the output directory");
+
+  const outputUrl = `/${path.relative(ROOT, modelPath).split(path.sep).join("/")}`;
+  const isGlb = modelPath.endsWith(".glb");
+
+  return {
+    output: isGlb ? { glbUrl: outputUrl } : { objUrl: outputUrl },
+    preview: null
+  };
 }
 
 function createPromptHeights(width, height, prompt) {
@@ -258,19 +449,23 @@ function scheduleJob(payload) {
 
   jobs.set(id, job);
 
-  setTimeout(() => {
+  setTimeout(async () => {
     try {
       job.status = "running";
-      job.progress = 42;
-      const result = buildMesh(payload, id);
+      job.progress = 12;
+      job.runner = payload.runner === "relief" ? "relief" : "sf3d";
+      const result = job.runner === "sf3d"
+        ? await runSf3d(payload, id, job)
+        : buildMesh(payload, id);
       job.status = "done";
       job.progress = 100;
       job.output = result.output;
-      job.preview = result.preview;
+      if (result.preview) job.preview = result.preview;
       job.completedAt = new Date().toISOString();
     } catch (error) {
       job.status = "failed";
       job.error = error.message;
+      job.progress = 100;
     }
   }, 180);
 
@@ -304,11 +499,7 @@ async function handleRequest(request, response) {
   const url = new URL(request.url, `http://${request.headers.host}`);
 
   if (request.method === "GET" && url.pathname === "/api/ai3d/status") {
-    sendJson(response, 200, {
-      ok: true,
-      runner: "local-relief-v1",
-      modelServer: "placeholder"
-    });
+    sendJson(response, 200, getCapabilities());
     return;
   }
 
